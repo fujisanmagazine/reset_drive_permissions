@@ -172,7 +172,7 @@ def get_all_files(service, limit=None):
     while True:
         page_size = min(1000, limit - len(items)) if limit else 1000
         response = service.files().list(
-            q="trashed = false",
+            q="trashed = false and 'me' in owners",
             spaces='drive',
             fields='nextPageToken, files(id, name, mimeType, webViewLink)',
             pageToken=page_token,

@@ -41,15 +41,19 @@ build:
 	docker build -t $(IMAGE):$(TAG) .
 
 run:
+	@test -f config.json || echo '{}' > config.json
 	docker run --rm -it \
 		-v $(PWD)/credentials.json:/app/credentials.json \
 		-v $(PWD)/token.json:/app/token.json \
+		-v $(PWD)/config.json:/app/config.json \
 		$(IMAGE):$(TAG) --run --no-browser $(ARGS)
 
 dry-run:
+	@test -f config.json || echo '{}' > config.json
 	docker run --rm -it \
 		-v $(PWD)/credentials.json:/app/credentials.json \
 		-v $(PWD)/token.json:/app/token.json \
+		-v $(PWD)/config.json:/app/config.json \
 		$(IMAGE):$(TAG) --dry-run --no-browser $(ARGS)
 
 clean:

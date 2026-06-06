@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import json
 import argparse
 from datetime import datetime
 from google.oauth2.credentials import Credentials
@@ -30,6 +31,55 @@ def get_credentials_path():
 
 CREDENTIALS_PATH = get_credentials_path()
 TOKEN_PATH = os.path.join(get_app_dir(), 'token.json')
+CONFIG_PATH = os.path.join(get_app_dir(), 'config.json')
+
+
+def load_config():
+    if not os.path.exists(CONFIG_PATH):
+        return {}
+    with open(CONFIG_PATH) as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return {}
+
+
+def get_user_email(service_drive):
+    about = service_drive.about().get(fields='user').execute()
+    return about['user']['emailAddress']
+
+
+def update_user_tracking(creds, spreadsheet_id, email):
+    service = build('sheets', 'v4', credentials=creds)
+    sheets = service.spreadsheets()
+
+    result = sheets.values().get(
+        spreadsheetId=spreadsheet_id,
+        range='A:A',
+    ).execute()
+
+    rows = result.get('values', [])
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    for i, row in enumerate(rows):
+        if row and row[0] == email:
+            sheets.values().update(
+                spreadsheetId=spreadsheet_id,
+                range=f'B{i + 1}',
+                valueInputOption='RAW',
+                body={'values': [[timestamp]]},
+            ).execute()
+            print(f"ユーザー追跡を更新しました: {email}")
+            return
+
+    sheets.values().append(
+        spreadsheetId=spreadsheet_id,
+        range='A:B',
+        valueInputOption='RAW',
+        insertDataOption='INSERT_ROWS',
+        body={'values': [[email, timestamp]]},
+    ).execute()
+    print(f"ユーザー追跡に新規追加しました: {email}")
 
 
 def authenticate(auth_port=8080, open_browser=True, allow_new_flow=True):
@@ -238,6 +288,23 @@ def main():
     if not interactive:
         print("=== Google Drive 権限リセットツール ===\n")
 
+    config = load_config()
+
+    if args.spreadsheet:
+        try:
+            extract_spreadsheet_id(args.spreadsheet)
+        except ValueError as e:
+            print(f"エラー: --spreadsheet の {e}")
+            sys.exit(1)
+
+    tracking_url = config.get('user_tracking_spreadsheet')
+    if tracking_url:
+        try:
+            extract_spreadsheet_id(tracking_url)
+        except ValueError as e:
+            print(f"エラー: config.json の user_tracking_spreadsheet の {e}")
+            sys.exit(1)
+
     is_docker_mode = args.no_browser
     creds = authenticate(
         auth_port=args.auth_port,
@@ -250,7 +317,8 @@ def main():
         pause_on_exit()
         return
 
-    if args.spreadsheet:
+    needs_sheets = args.spreadsheet or config.get('user_tracking_spreadsheet')
+    if needs_sheets:
         creds = ensure_sheets_scope(creds, args.auth_port, not is_docker_mode)
 
     service_drive = build('drive', 'v3', credentials=creds)
@@ -284,6 +352,13 @@ def main():
         return
 
     print(f"\n完了: {len(targets)} 件の一般アクセスを削除しました。")
+
+    tracking_url = config.get('user_tracking_spreadsheet')
+    if tracking_url:
+        tracking_id = extract_spreadsheet_id(tracking_url)
+        email = get_user_email(service_drive)
+        update_user_tracking(creds, tracking_id, email)
+
     pause_on_exit()
 
 

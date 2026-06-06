@@ -109,6 +109,36 @@ Works with both `--dry-run` and `--run`.
 
 ---
 
+## Configuration file
+
+Create `config.json` in the same directory as the exe (or project root for Docker) to enable optional features. See `config.json.example` for the format.
+
+| Key | Description |
+|-----|-------------|
+| `user_tracking_spreadsheet` | URL of a Google Spreadsheet used to track which users have run the tool and when |
+
+**Example `config.json`:**
+
+```json
+{
+  "user_tracking_spreadsheet": "https://docs.google.com/spreadsheets/d/YOUR_ID/edit"
+}
+```
+
+After each successful run (not dry-run), the tool looks up the authenticated user's email address in the tracking spreadsheet:
+- If the email exists, the **Last Run** date is updated
+- If not, a new row is added with the email and current timestamp
+
+**Tracking spreadsheet format:**
+
+| メールアドレス | 最終実行日時 |
+|---|---|
+| user@example.com | 2026-06-06 12:00:00 |
+
+If `config.json` is absent or the key is not set, user tracking is silently skipped.
+
+---
+
 ## All options
 
 | Option | Description |

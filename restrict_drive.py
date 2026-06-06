@@ -1,5 +1,6 @@
 import os
 import json
+import argparse
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -117,6 +118,13 @@ def restrict_file(service, file, dry_run=True):
 
 
 def main():
+    parser = argparse.ArgumentParser(description='Google Drive 権限リセットツール')
+    parser.add_argument('-d', '--dry-run', action='store_true',
+                        help='変更をせずに対象ファイルを表示のみ')
+    parser.add_argument('-n', '--max-items', type=int, default=None,
+                        help='処理する最大ファイル数')
+    args = parser.parse_args()
+
     print("=== Google Drive 権限リセットツール ===\n")
 
     # 認証
@@ -127,13 +135,13 @@ def main():
     files = get_all_files(service)
     print(f"\n合計 {len(files)} 件のファイル・フォルダを取得\n")
 
-    # --- まずドライランで確認 ---
-    print("【ドライラン：変更対象の確認】")
     print("-" * 40)
     targets = []
 
     for file in files:
-        if restrict_file(service, file, dry_run=True):
+        if args.max_items and len(targets) >= args.max_items:
+            break
+        if restrict_file(service, file, dry_run=args.dry_run):
             targets.append(file)
 
     print("-" * 40)
@@ -143,9 +151,11 @@ def main():
         print("変更が必要なファイルはありません。")
         return
 
-    # --- 確認プロンプト ---
-    answer = input(f"{len(targets)} 件の一般アクセスを削除します。実行しますか？ (yes/no): ")
+    if args.dry_run:
+        print("ドライランモード: 変更は行いません。")
+        return
 
+    answer = input(f"{len(targets)} 件の一般アクセスを削除します。実行しますか？ (yes/no): ")
     if answer.lower() != 'yes':
         print("キャンセルしました。")
         return

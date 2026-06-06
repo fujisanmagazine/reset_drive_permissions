@@ -1,37 +1,31 @@
 import os
-import json
+import sys
 import argparse
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
+from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 # 必要なスコープ
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
-def authenticate():
-    """Google Drive APIの認証"""
+def authenticate(auth_port=8080):
+    """Google Drive APIの認証 (OAuth2 InstalledAppFlow)"""
     creds = None
 
-    # 既存トークンの読み込み
     if os.path.exists('token.json') and os.path.getsize('token.json') > 0:
         creds = Credentials.from_authorized_user_file('token.json', SCOPES)
 
-    # トークンがない or 期限切れの場合
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
             flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            print(f"\nポート {auth_port} でOAuthコールバックサーバーを起動します。")
+            print(f"コンソール専用マシンの場合、別マシンから以下でSSHトンネルを張ってください:")
+            print(f"  ssh -L {auth_port}:localhost:{auth_port} <このサーバー>\n")
+            creds = flow.run_local_server(port=auth_port, open_browser=False)
 
-            flow.redirect_uri = 'urn:ietf:wg:oauth:2.0:oob'
-            auth_url, _ = flow.authorization_url(prompt='consent')
-            print(f"\n以下のURLをブラウザで開いてください:\n{auth_url}\n")
-            code = input("認証コードを貼り付けてください: ")
-            flow.fetch_token(code=code)
-            creds = flow.credentials
-
-        # トークンを保存
         with open('token.json', 'w') as token:
             token.write(creds.to_json())
 
@@ -119,16 +113,36 @@ def restrict_file(service, file, dry_run=True):
 
 def main():
     parser = argparse.ArgumentParser(description='Google Drive 権限リセットツール')
-    parser.add_argument('-d', '--dry-run', action='store_true',
-                        help='変更をせずに対象ファイルを表示のみ')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('-d', '--dry-run', action='store_true',
+                      help='変更をせずに対象ファイルを表示のみ')
+    mode.add_argument('-r', '--run', action='store_true',
+                      help='一般アクセス権限を実際に削除する')
+    mode.add_argument('-a', '--auth', action='store_true',
+                      help='認証のみ実行してtoken.jsonを生成する')
     parser.add_argument('-n', '--max-items', type=int, default=None,
                         help='処理する最大ファイル数')
+    parser.add_argument('--auth-port', type=int, default=8080,
+                        help='OAuthコールバック用ローカルポート (デフォルト: 8080)')
+
+    if len(sys.argv) == 1:
+        parser.print_help()
+        sys.exit(0)
+
     args = parser.parse_args()
+
+    if not args.dry_run and not args.run and not args.auth:
+        parser.print_help()
+        sys.exit(0)
 
     print("=== Google Drive 権限リセットツール ===\n")
 
     # 認証
-    creds = authenticate()
+    creds = authenticate(auth_port=args.auth_port)
+
+    if args.auth:
+        print("認証完了。token.jsonを保存しました。")
+        return
     service = build('drive', 'v3', credentials=creds)
 
     # 全ファイル取得
@@ -141,7 +155,7 @@ def main():
     for file in files:
         if args.max_items and len(targets) >= args.max_items:
             break
-        if restrict_file(service, file, dry_run=args.dry_run):
+        if restrict_file(service, file, dry_run=not args.run):
             targets.append(file)
 
     print("-" * 40)
@@ -155,26 +169,7 @@ def main():
         print("ドライランモード: 変更は行いません。")
         return
 
-    answer = input(f"{len(targets)} 件の一般アクセスを削除します。実行しますか？ (yes/no): ")
-    if answer.lower() != 'yes':
-        print("キャンセルしました。")
-        return
-
-    # --- 実際に実行 ---
-    print("\n【実行中】")
-    print("-" * 40)
-    success = 0
-    failed = 0
-
-    for file in targets:
-        result = restrict_file(service, file, dry_run=False)
-        if result:
-            success += 1
-        else:
-            failed += 1
-
-    print("-" * 40)
-    print(f"\n完了: 成功 {success} 件 / 失敗 {failed} 件")
+    print(f"\n完了: {len(targets)} 件の一般アクセスを削除しました。")
 
 
 if __name__ == '__main__':

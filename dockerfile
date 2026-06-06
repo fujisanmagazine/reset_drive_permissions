@@ -19,9 +19,8 @@ ENV PATH="/app/venv/bin:$PATH"
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# スクリプトと認証情報のコピー
+# スクリプトのコピー
 COPY restrict_drive.py .
-COPY credentials.json .
 
 # 実行
-CMD ["python", "restrict_drive.py"]
+ENTRYPOINT ["python", "restrict_drive.py"]

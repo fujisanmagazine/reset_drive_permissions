@@ -13,7 +13,7 @@ def authenticate():
     creds = None
 
     # 既存トークンの読み込み
-    if os.path.exists('token.json'):
+    if os.path.exists('token.json') and os.path.getsize('token.json') > 0:
         creds = Credentials.from_authorized_user_file('token.json', SCOPES)
 
     # トークンがない or 期限切れの場合
@@ -28,6 +28,7 @@ def authenticate():
             print(f"\n以下のURLをブラウザで開いてください:\n{auth_url}\n")
             code = input("認証コードを貼り付けてください: ")
             flow.fetch_token(code=code)
+            creds = flow.credentials
 
         # トークンを保存
         with open('token.json', 'w') as token:

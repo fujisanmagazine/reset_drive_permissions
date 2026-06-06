@@ -6,27 +6,44 @@ from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-# 必要なスコープ
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
-def authenticate(auth_port=8080):
+
+def get_app_dir():
+    """Return the directory containing credentials/token files."""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+CREDENTIALS_PATH = os.path.join(get_app_dir(), 'credentials.json')
+TOKEN_PATH = os.path.join(get_app_dir(), 'token.json')
+
+
+def authenticate(auth_port=8080, open_browser=True, allow_new_flow=True):
     """Google Drive APIの認証 (OAuth2 InstalledAppFlow)"""
     creds = None
 
-    if os.path.exists('token.json') and os.path.getsize('token.json') > 0:
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if os.path.exists(TOKEN_PATH) and os.path.getsize(TOKEN_PATH) > 0:
+        creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-            print(f"\nポート {auth_port} でOAuthコールバックサーバーを起動します。")
-            print(f"コンソール専用マシンの場合、別マシンから以下でSSHトンネルを張ってください:")
-            print(f"  ssh -L {auth_port}:localhost:{auth_port} <このサーバー>\n")
-            creds = flow.run_local_server(port=auth_port, open_browser=False)
+            if not allow_new_flow:
+                raise Exception(
+                    "有効なtoken.jsonがありません。先に 'make auth' を実行してください。"
+                )
+            if not open_browser:
+                print(f"\nポート {auth_port} でOAuthコールバックサーバーを起動します。")
+                print(f"リモートサーバーの場合、別マシンから以下でSSHトンネルを張ってください:")
+                print(f"  ssh -L {auth_port}:localhost:{auth_port} <このサーバー>\n")
+            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
+            bind = '0.0.0.0' if not open_browser else '127.0.0.1'
+            creds = flow.run_local_server(port=auth_port, open_browser=open_browser, bind_addr=bind)
 
-        with open('token.json', 'w') as token:
+        with open(TOKEN_PATH, 'w') as token:
             token.write(creds.to_json())
 
     return creds
@@ -78,17 +95,13 @@ def get_anyone_permission(service, file_id):
 
 
 def restrict_file(service, file, dry_run=True):
-    """
-    ファイルの一般アクセス権限を削除してオーナーのみに制限。
-    dry_run=True の場合は実際には変更しない（確認用）
-    """
     file_id = file['id']
     file_name = file['name']
 
     perm = get_anyone_permission(service, file_id)
 
     if not perm:
-        return False  # すでに制限済み
+        return False
 
     perm_type = perm.get('type')
     domain = perm.get('domain', '')
@@ -111,6 +124,31 @@ def restrict_file(service, file, dry_run=True):
     return True
 
 
+def interactive_mode():
+    """No-argument interactive prompt for non-technical users."""
+    print("=== Google Drive 権限リセットツール ===\n")
+    print("[1] ドライラン - 変更対象のファイルを確認する（変更なし）")
+    print("[2] 実行       - 一般アクセス権限を削除する")
+    print("[q] 終了\n")
+
+    choice = input("選択してください: ").strip()
+
+    if choice == '1':
+        return 'dry-run'
+    elif choice == '2':
+        confirm = input("\n本当に実行しますか？ (yes/no): ").strip().lower()
+        if confirm == 'yes':
+            return 'run'
+        print("キャンセルしました。")
+    return None
+
+
+def pause_on_exit():
+    """Keep console window open when run as a Windows exe by double-click."""
+    if getattr(sys, 'frozen', False) and sys.platform == 'win32':
+        input("\nEnterキーを押して終了...")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Google Drive 権限リセットツール')
     mode = parser.add_mutually_exclusive_group()
@@ -124,28 +162,43 @@ def main():
                         help='処理する最大ファイル数')
     parser.add_argument('--auth-port', type=int, default=8080,
                         help='OAuthコールバック用ローカルポート (デフォルト: 8080)')
+    parser.add_argument('--no-browser', action='store_true',
+                        help='ブラウザを自動で開かない（リモートサーバー用）')
 
+    interactive = False
     if len(sys.argv) == 1:
-        parser.print_help()
-        sys.exit(0)
-
-    args = parser.parse_args()
+        mode_choice = interactive_mode()
+        if not mode_choice:
+            pause_on_exit()
+            sys.exit(0)
+        interactive = True
+        args = parser.parse_args(['--dry-run' if mode_choice == 'dry-run' else '--run'])
+    else:
+        args = parser.parse_args()
 
     if not args.dry_run and not args.run and not args.auth:
         parser.print_help()
         sys.exit(0)
 
-    print("=== Google Drive 権限リセットツール ===\n")
+    if not interactive:
+        print("=== Google Drive 権限リセットツール ===\n")
 
-    # 認証
-    creds = authenticate(auth_port=args.auth_port)
+    is_docker_mode = args.no_browser
+    allow_new = args.auth  # only --auth may start a new OAuth flow in headless mode
+
+    creds = authenticate(
+        auth_port=args.auth_port,
+        open_browser=not is_docker_mode,
+        allow_new_flow=not is_docker_mode or allow_new,
+    )
 
     if args.auth:
         print("認証完了。token.jsonを保存しました。")
+        pause_on_exit()
         return
+
     service = build('drive', 'v3', credentials=creds)
 
-    # 全ファイル取得
     files = get_all_files(service)
     print(f"\n合計 {len(files)} 件のファイル・フォルダを取得\n")
 
@@ -163,13 +216,16 @@ def main():
 
     if not targets:
         print("変更が必要なファイルはありません。")
+        pause_on_exit()
         return
 
     if args.dry_run:
         print("ドライランモード: 変更は行いません。")
+        pause_on_exit()
         return
 
     print(f"\n完了: {len(targets)} 件の一般アクセスを削除しました。")
+    pause_on_exit()
 
 
 if __name__ == '__main__':

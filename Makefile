@@ -33,7 +33,7 @@ auth:
 		-p $(AUTH_PORT):$(AUTH_PORT) \
 		-v $(PWD)/credentials.json:/app/credentials.json \
 		-v $(PWD)/token.json:/app/token.json \
-		$(IMAGE):$(TAG) --auth --auth-port $(AUTH_PORT)
+		$(IMAGE):$(TAG) --auth --auth-port $(AUTH_PORT) --no-browser
 
 build:
 	docker build -t $(IMAGE):$(TAG) .
@@ -42,13 +42,13 @@ run:
 	docker run --rm -it \
 		-v $(PWD)/credentials.json:/app/credentials.json \
 		-v $(PWD)/token.json:/app/token.json \
-		$(IMAGE):$(TAG) --run $(ARGS)
+		$(IMAGE):$(TAG) --run --no-browser $(ARGS)
 
 dry-run:
 	docker run --rm -it \
 		-v $(PWD)/credentials.json:/app/credentials.json \
 		-v $(PWD)/token.json:/app/token.json \
-		$(IMAGE):$(TAG) --dry-run $(ARGS)
+		$(IMAGE):$(TAG) --dry-run --no-browser $(ARGS)
 
 clean:
 	docker rmi $(IMAGE):$(TAG)

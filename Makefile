@@ -43,6 +43,7 @@ build:
 run:
 	@test -f config.json || echo '{}' > config.json
 	docker run --rm -it \
+		-p $(AUTH_PORT):$(AUTH_PORT) \
 		-v $(PWD)/credentials.json:/app/credentials.json \
 		-v $(PWD)/token.json:/app/token.json \
 		-v $(PWD)/config.json:/app/config.json \
@@ -51,6 +52,7 @@ run:
 dry-run:
 	@test -f config.json || echo '{}' > config.json
 	docker run --rm -it \
+		-p $(AUTH_PORT):$(AUTH_PORT) \
 		-v $(PWD)/credentials.json:/app/credentials.json \
 		-v $(PWD)/token.json:/app/token.json \
 		-v $(PWD)/config.json:/app/config.json \

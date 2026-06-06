@@ -8,6 +8,7 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from google.auth.exceptions import RefreshError
 
 SCOPES = [
     'https://www.googleapis.com/auth/drive',
@@ -90,8 +91,13 @@ def authenticate(auth_port=8080, open_browser=True, allow_new_flow=True):
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+            except RefreshError:
+                print("トークンの更新に失敗しました。再認証します。token.jsonを削除します。")
+                open(TOKEN_PATH, 'w').close()
+                creds = None
+        if not creds or not creds.valid:
             if not allow_new_flow:
                 raise Exception(
                     "有効なtoken.jsonがありません。先に 'make auth' を実行してください。"
@@ -115,7 +121,7 @@ def ensure_sheets_scope(creds, auth_port, open_browser):
     sheets_scope = 'https://www.googleapis.com/auth/spreadsheets'
     if creds.scopes and sheets_scope not in creds.scopes:
         print("スプレッドシートのアクセス権が必要なため再認証します。token.jsonを削除します。")
-        os.remove(TOKEN_PATH)
+        open(TOKEN_PATH, 'w').close()
         return authenticate(auth_port=auth_port, open_browser=open_browser, allow_new_flow=True)
     return creds
 
@@ -136,10 +142,15 @@ def write_to_spreadsheet(creds, spreadsheet_id, targets, dry_run):
         range='A:Z',
     ).execute()
 
-    status = 'ドライラン（変更なし）' if dry_run else '制限済み'
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     rows = [['日時', 'ファイル名', 'URL', 'アクセス設定', 'ステータス']]
-    for file, label in targets:
+    for file, label, error in targets:
+        if error:
+            status = f'エラー: {error}'
+        elif dry_run:
+            status = 'ドライラン（変更なし）'
+        else:
+            status = '制限済み'
         rows.append([timestamp, file['name'], file.get('webViewLink', ''), label, status])
 
     sheets.values().update(
@@ -197,14 +208,15 @@ def get_anyone_permission(service, file_id):
 
 
 def restrict_file(service, file, dry_run=True):
-    """Returns the permission label string if the file is a target, None otherwise."""
+    """Returns (label, error) if the file has a public permission, (None, None) otherwise.
+    On success error is None; on delete failure error is the exception string."""
     file_id = file['id']
     file_name = file['name']
 
     perm = get_anyone_permission(service, file_id)
 
     if not perm:
-        return None
+        return None, None
 
     perm_type = perm.get('type')
     domain = perm.get('domain', '')
@@ -224,9 +236,9 @@ def restrict_file(service, file, dry_run=True):
             print(f"    ✅ 制限済み")
         except Exception as e:
             print(f"    ❌ エラー: {e}")
-            return None
+            return label, str(e)
 
-    return label
+    return label, None
 
 
 def interactive_mode():
@@ -309,7 +321,7 @@ def main():
     creds = authenticate(
         auth_port=args.auth_port,
         open_browser=not is_docker_mode,
-        allow_new_flow=not is_docker_mode or args.auth,
+        allow_new_flow=True,
     )
 
     if args.auth:
@@ -329,13 +341,20 @@ def main():
     print("-" * 40)
     targets = []
 
-    for file in files:
-        label = restrict_file(service_drive, file, dry_run=not args.run)
+    total = len(files)
+    for i, file in enumerate(files):
+        remaining = total - i - 1
+        print(f"[{i + 1}/{total}] {file['name']} (残り {remaining} 件)")
+        label, error = restrict_file(service_drive, file, dry_run=not args.run)
         if label is not None:
-            targets.append((file, label))
+            targets.append((file, label, error))
 
     print("-" * 40)
-    print(f"\n変更対象: {len(targets)} 件\n")
+
+    failures  = [t for t in targets if t[2]]
+    successes = [t for t in targets if not t[2]]
+    print(f"\n変更対象: {len(targets)} 件"
+          + (f" ({len(failures)} 件エラー)" if failures else "") + "\n")
 
     if not targets:
         print("変更が必要なファイルはありません。")
@@ -345,16 +364,17 @@ def main():
     if args.spreadsheet:
         spreadsheet_id = extract_spreadsheet_id(args.spreadsheet)
         write_to_spreadsheet(creds, spreadsheet_id, targets, dry_run=not args.run)
-    
+
     if args.dry_run:
         print("ドライランモード: 変更は行いません。")
         pause_on_exit()
         return
 
-    print(f"\n完了: {len(targets)} 件の一般アクセスを削除しました。")
+    print(f"\n完了: {len(successes)} 件の一般アクセスを削除しました。"
+          + (f" ({len(failures)} 件失敗)" if failures else ""))
 
     tracking_url = config.get('user_tracking_spreadsheet')
-    if tracking_url:
+    if tracking_url and successes:
         tracking_id = extract_spreadsheet_id(tracking_url)
         email = get_user_email(service_drive)
         update_user_tracking(creds, tracking_id, email)

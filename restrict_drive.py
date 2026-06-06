@@ -15,6 +15,9 @@ SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
 ]
 
+# Statuses that mean a file is fully processed — skip on subsequent runs.
+DONE_STATUSES = {'変更なし', '制限済み'}
+
 
 def get_app_dir():
     if getattr(sys, 'frozen', False):
@@ -23,8 +26,6 @@ def get_app_dir():
 
 
 def get_credentials_path():
-    # When bundled by PyInstaller, credentials.json is in the temp _MEIPASS dir.
-    # At runtime (unfrozen or for token.json), use the exe/script directory.
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, 'credentials.json')
     return os.path.join(get_app_dir(), 'credentials.json')
@@ -117,7 +118,6 @@ def authenticate(auth_port=8080, open_browser=True, allow_new_flow=True):
 
 
 def ensure_sheets_scope(creds, auth_port, open_browser):
-    """Re-authenticate if the Sheets scope is missing from the saved token."""
     sheets_scope = 'https://www.googleapis.com/auth/spreadsheets'
     if creds.scopes and sheets_scope not in creds.scopes:
         print("スプレッドシートのアクセス権が必要なため再認証します。token.jsonを削除します。")
@@ -133,58 +133,87 @@ def extract_spreadsheet_id(url):
     return match.group(1)
 
 
-def write_to_spreadsheet(creds, spreadsheet_id, targets, dry_run):
+def load_logged_file_ids(creds, spreadsheet_id, batch_size=1000):
+    """Return the set of file IDs already logged with a done status, loaded in batches."""
     service = build('sheets', 'v4', credentials=creds)
     sheets = service.spreadsheets()
 
-    sheets.values().clear(
+    done = set()
+    start_row = 2  # row 1 is the header
+
+    while True:
+        end_row = start_row + batch_size - 1
+        result = sheets.values().get(
+            spreadsheetId=spreadsheet_id,
+            range=f'B{start_row}:F{end_row}',
+        ).execute()
+
+        rows = result.get('values', [])
+        for row in rows:
+            if len(row) >= 5 and row[4] in DONE_STATUSES:
+                done.add(row[0])
+
+        if len(rows) < batch_size:
+            break
+
+        start_row += batch_size
+
+    return done
+
+
+def append_to_spreadsheet(creds, spreadsheet_id, rows):
+    """Append rows to the log spreadsheet, writing a header first if the sheet is empty."""
+    service = build('sheets', 'v4', credentials=creds)
+    sheets = service.spreadsheets()
+
+    existing = sheets.values().get(
         spreadsheetId=spreadsheet_id,
-        range='A:Z',
+        range='A1:A1',
     ).execute()
 
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    rows = [['日時', 'ファイル名', 'URL', 'アクセス設定', 'ステータス']]
-    for file, label, error in targets:
-        if error:
-            status = f'エラー: {error}'
-        elif dry_run:
-            status = 'ドライラン（変更なし）'
-        else:
-            status = '制限済み'
-        rows.append([timestamp, file['name'], file.get('webViewLink', ''), label, status])
+    to_write = rows
+    if not existing.get('values'):
+        header = [['日時', 'ファイルID', 'ファイル名', 'URL', 'アクセス設定', 'ステータス']]
+        to_write = header + rows
 
-    sheets.values().update(
+    sheets.values().append(
         spreadsheetId=spreadsheet_id,
-        range='A1',
+        range='A:F',
         valueInputOption='RAW',
-        body={'values': rows},
+        insertDataOption='INSERT_ROWS',
+        body={'values': to_write},
     ).execute()
 
-    print(f"スプレッドシートに {len(targets)} 件を書き込みました。")
+    print(f"スプレッドシートに {len(rows)} 件を追記しました。")
 
 
-def get_all_files(service, limit=None):
+def get_all_files(service, limit=None, skip_ids=None):
     items = []
     page_token = None
+    skip_ids = skip_ids or set()
 
     print("ファイル一覧を取得中...")
 
     while True:
-        page_size = min(1000, limit - len(items)) if limit else 1000
         response = service.files().list(
             q="trashed = false and 'me' in owners",
             spaces='drive',
             fields='nextPageToken, files(id, name, mimeType, webViewLink)',
             pageToken=page_token,
-            pageSize=page_size
+            pageSize=1000,
         ).execute()
 
-        items.extend(response.get('files', []))
-        page_token = response.get('nextPageToken')
+        for file in response.get('files', []):
+            if file['id'] not in skip_ids:
+                items.append(file)
+                if limit and len(items) >= limit:
+                    print(f"  {len(items)}件取得済み...")
+                    return items
 
+        page_token = response.get('nextPageToken')
         print(f"  {len(items)}件取得済み...")
 
-        if not page_token or (limit and len(items) >= limit):
+        if not page_token:
             break
 
     return items
@@ -208,12 +237,8 @@ def get_anyone_permission(service, file_id):
 
 
 def restrict_file(service, file, dry_run=True):
-    """Returns (label, error) if the file has a public permission, (None, None) otherwise.
-    On success error is None; on delete failure error is the exception string."""
-    file_id = file['id']
-    file_name = file['name']
-
-    perm = get_anyone_permission(service, file_id)
+    """Returns (label, error) if the file has a public permission, (None, None) otherwise."""
+    perm = get_anyone_permission(service, file['id'])
 
     if not perm:
         return None, None
@@ -224,17 +249,20 @@ def restrict_file(service, file, dry_run=True):
     if domain:
         label += f' ({domain})'
 
-    print(f"  対象: {file_name}")
+    print(f"  対象: {file['name']}")
     print(f"    現在の設定: {label}")
 
     if not dry_run:
         try:
             service.permissions().delete(
-                fileId=file_id,
+                fileId=file['id'],
                 permissionId=perm['id']
             ).execute()
             print(f"    ✅ 制限済み")
         except Exception as e:
+            if 'cannotDeletePermission' in str(e):
+                print(f"    ⚠️ スキップ（親フォルダから継承された権限）")
+                return label, "継承済み権限（削除不可）"
             print(f"    ❌ エラー: {e}")
             return label, str(e)
 
@@ -276,7 +304,7 @@ def main():
     parser.add_argument('-n', '--max-items', type=int, default=None,
                         help='処理する最大ファイル数')
     parser.add_argument('-s', '--spreadsheet', metavar='URL',
-                        help='結果を書き込むGoogleスプレッドシートのURL')
+                        help='ログを追記するGoogleスプレッドシートのURL')
     parser.add_argument('--auth-port', type=int, default=8080,
                         help='OAuthコールバック用ローカルポート (デフォルト: 8080)')
     parser.add_argument('--no-browser', action='store_true',
@@ -329,41 +357,71 @@ def main():
         pause_on_exit()
         return
 
-    needs_sheets = args.spreadsheet or config.get('user_tracking_spreadsheet')
+    needs_sheets = args.spreadsheet or tracking_url
     if needs_sheets:
         creds = ensure_sheets_scope(creds, args.auth_port, not is_docker_mode)
 
     service_drive = build('drive', 'v3', credentials=creds)
 
-    files = get_all_files(service_drive, limit=args.max_items)
+    # Load already-processed file IDs from the log spreadsheet.
+    logged_ids = set()
+    if args.spreadsheet:
+        spreadsheet_id = extract_spreadsheet_id(args.spreadsheet)
+        logged_ids = load_logged_file_ids(creds, spreadsheet_id, batch_size=args.max_items or 1000)
+        if logged_ids:
+            print(f"ログ済みファイル {len(logged_ids)} 件をスキップします。\n")
+
+    files = get_all_files(service_drive, limit=args.max_items, skip_ids=logged_ids)
     print(f"\n合計 {len(files)} 件のファイル・フォルダを取得\n")
 
     print("-" * 40)
     targets = []
+    new_log_rows = []
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     total = len(files)
     for i, file in enumerate(files):
         remaining = total - i - 1
         print(f"[{i + 1}/{total}] {file['name']} (残り {remaining} 件)")
+
         label, error = restrict_file(service_drive, file, dry_run=not args.run)
+
         if label is not None:
             targets.append((file, label, error))
+
+        if error:
+            status = f'エラー: {error}'
+        elif label is None:
+            status = '変更なし'
+        elif args.dry_run:
+            status = 'ドライラン（変更なし）'
+        else:
+            status = '制限済み'
+
+        new_log_rows.append([
+            timestamp,
+            file['id'],
+            file['name'],
+            file.get('webViewLink', ''),
+            label or '',
+            status,
+        ])
 
     print("-" * 40)
 
     failures  = [t for t in targets if t[2]]
     successes = [t for t in targets if not t[2]]
     print(f"\n変更対象: {len(targets)} 件"
-          + (f" ({len(failures)} 件エラー)" if failures else "") + "\n")
+          + (f" ({len(failures)} 件エラー)" if failures else "")
+          + (f" / スキップ済み: {len(logged_ids)} 件" if logged_ids else "") + "\n")
+
+    if args.spreadsheet and new_log_rows:
+        append_to_spreadsheet(creds, spreadsheet_id, new_log_rows)
 
     if not targets:
         print("変更が必要なファイルはありません。")
         pause_on_exit()
         return
-
-    if args.spreadsheet:
-        spreadsheet_id = extract_spreadsheet_id(args.spreadsheet)
-        write_to_spreadsheet(creds, spreadsheet_id, targets, dry_run=not args.run)
 
     if args.dry_run:
         print("ドライランモード: 変更は行いません。")
@@ -373,7 +431,6 @@ def main():
     print(f"\n完了: {len(successes)} 件の一般アクセスを削除しました。"
           + (f" ({len(failures)} 件失敗)" if failures else ""))
 
-    tracking_url = config.get('user_tracking_spreadsheet')
     if tracking_url and successes:
         tracking_id = extract_spreadsheet_id(tracking_url)
         email = get_user_email(service_drive)

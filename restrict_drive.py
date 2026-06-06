@@ -1,27 +1,38 @@
 import os
+import re
 import sys
 import argparse
+from datetime import datetime
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-SCOPES = ['https://www.googleapis.com/auth/drive']
+SCOPES = [
+    'https://www.googleapis.com/auth/drive',
+    'https://www.googleapis.com/auth/spreadsheets',
+]
 
 
 def get_app_dir():
-    """Return the directory containing credentials/token files."""
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
 
-CREDENTIALS_PATH = os.path.join(get_app_dir(), 'credentials.json')
+def get_credentials_path():
+    # When bundled by PyInstaller, credentials.json is in the temp _MEIPASS dir.
+    # At runtime (unfrozen or for token.json), use the exe/script directory.
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, 'credentials.json')
+    return os.path.join(get_app_dir(), 'credentials.json')
+
+
+CREDENTIALS_PATH = get_credentials_path()
 TOKEN_PATH = os.path.join(get_app_dir(), 'token.json')
 
 
 def authenticate(auth_port=8080, open_browser=True, allow_new_flow=True):
-    """Google Drive APIの認証 (OAuth2 InstalledAppFlow)"""
     creds = None
 
     if os.path.exists(TOKEN_PATH) and os.path.getsize(TOKEN_PATH) > 0:
@@ -49,8 +60,49 @@ def authenticate(auth_port=8080, open_browser=True, allow_new_flow=True):
     return creds
 
 
+def ensure_sheets_scope(creds, auth_port, open_browser):
+    """Re-authenticate if the Sheets scope is missing from the saved token."""
+    sheets_scope = 'https://www.googleapis.com/auth/spreadsheets'
+    if creds.scopes and sheets_scope not in creds.scopes:
+        print("スプレッドシートのアクセス権が必要なため再認証します。token.jsonを削除します。")
+        os.remove(TOKEN_PATH)
+        return authenticate(auth_port=auth_port, open_browser=open_browser, allow_new_flow=True)
+    return creds
+
+
+def extract_spreadsheet_id(url):
+    match = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', url)
+    if not match:
+        raise ValueError(f"スプレッドシートURLからIDを取得できませんでした: {url}")
+    return match.group(1)
+
+
+def write_to_spreadsheet(creds, spreadsheet_id, targets, dry_run):
+    service = build('sheets', 'v4', credentials=creds)
+    sheets = service.spreadsheets()
+
+    sheets.values().clear(
+        spreadsheetId=spreadsheet_id,
+        range='A:Z',
+    ).execute()
+
+    status = 'ドライラン（変更なし）' if dry_run else '制限済み'
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    rows = [['日時', 'ファイル名', 'URL', 'アクセス設定', 'ステータス']]
+    for file, label in targets:
+        rows.append([timestamp, file['name'], file.get('webViewLink', ''), label, status])
+
+    sheets.values().update(
+        spreadsheetId=spreadsheet_id,
+        range='A1',
+        valueInputOption='RAW',
+        body={'values': rows},
+    ).execute()
+
+    print(f"スプレッドシートに {len(targets)} 件を書き込みました。")
+
+
 def get_all_files(service, limit=None):
-    """マイドライブの全ファイル・フォルダを取得"""
     items = []
     page_token = None
 
@@ -61,7 +113,7 @@ def get_all_files(service, limit=None):
         response = service.files().list(
             q="trashed = false",
             spaces='drive',
-            fields='nextPageToken, files(id, name, mimeType)',
+            fields='nextPageToken, files(id, name, mimeType, webViewLink)',
             pageToken=page_token,
             pageSize=page_size
         ).execute()
@@ -78,7 +130,6 @@ def get_all_files(service, limit=None):
 
 
 def get_anyone_permission(service, file_id):
-    """'anyone' または 'domain' タイプの権限を取得"""
     try:
         perms = service.permissions().list(
             fileId=file_id,
@@ -96,20 +147,23 @@ def get_anyone_permission(service, file_id):
 
 
 def restrict_file(service, file, dry_run=True):
+    """Returns the permission label string if the file is a target, None otherwise."""
     file_id = file['id']
     file_name = file['name']
 
     perm = get_anyone_permission(service, file_id)
 
     if not perm:
-        return False
+        return None
 
     perm_type = perm.get('type')
     domain = perm.get('domain', '')
-
     label = 'ドメイン全員' if perm_type == 'domain' else 'リンクを知っている全員'
+    if domain:
+        label += f' ({domain})'
+
     print(f"  対象: {file_name}")
-    print(f"    現在の設定: {label} {f'({domain})' if domain else ''}")
+    print(f"    現在の設定: {label}")
 
     if not dry_run:
         try:
@@ -120,13 +174,12 @@ def restrict_file(service, file, dry_run=True):
             print(f"    ✅ 制限済み")
         except Exception as e:
             print(f"    ❌ エラー: {e}")
-            return False
+            return None
 
-    return True
+    return label
 
 
 def interactive_mode():
-    """No-argument interactive prompt for non-technical users."""
     print("=== Google Drive 権限リセットツール ===\n")
     print("[1] ドライラン - 変更対象のファイルを確認する（変更なし）")
     print("[2] 実行       - 一般アクセス権限を削除する")
@@ -145,7 +198,6 @@ def interactive_mode():
 
 
 def pause_on_exit():
-    """Keep console window open when run as a Windows exe by double-click."""
     if getattr(sys, 'frozen', False) and sys.platform == 'win32':
         input("\nEnterキーを押して終了...")
 
@@ -161,6 +213,8 @@ def main():
                       help='認証のみ実行してtoken.jsonを生成する')
     parser.add_argument('-n', '--max-items', type=int, default=None,
                         help='処理する最大ファイル数')
+    parser.add_argument('-s', '--spreadsheet', metavar='URL',
+                        help='結果を書き込むGoogleスプレッドシートのURL')
     parser.add_argument('--auth-port', type=int, default=8080,
                         help='OAuthコールバック用ローカルポート (デフォルト: 8080)')
     parser.add_argument('--no-browser', action='store_true',
@@ -185,12 +239,10 @@ def main():
         print("=== Google Drive 権限リセットツール ===\n")
 
     is_docker_mode = args.no_browser
-    allow_new = args.auth  # only --auth may start a new OAuth flow in headless mode
-
     creds = authenticate(
         auth_port=args.auth_port,
         open_browser=not is_docker_mode,
-        allow_new_flow=not is_docker_mode or allow_new,
+        allow_new_flow=not is_docker_mode or args.auth,
     )
 
     if args.auth:
@@ -198,17 +250,21 @@ def main():
         pause_on_exit()
         return
 
-    service = build('drive', 'v3', credentials=creds)
+    if args.spreadsheet:
+        creds = ensure_sheets_scope(creds, args.auth_port, not is_docker_mode)
 
-    files = get_all_files(service, limit=args.max_items)
+    service_drive = build('drive', 'v3', credentials=creds)
+
+    files = get_all_files(service_drive, limit=args.max_items)
     print(f"\n合計 {len(files)} 件のファイル・フォルダを取得\n")
 
     print("-" * 40)
     targets = []
 
     for file in files:
-        if restrict_file(service, file, dry_run=not args.run):
-            targets.append(file)
+        label = restrict_file(service_drive, file, dry_run=not args.run)
+        if label is not None:
+            targets.append((file, label))
 
     print("-" * 40)
     print(f"\n変更対象: {len(targets)} 件\n")
@@ -218,6 +274,10 @@ def main():
         pause_on_exit()
         return
 
+    if args.spreadsheet:
+        spreadsheet_id = extract_spreadsheet_id(args.spreadsheet)
+        write_to_spreadsheet(creds, spreadsheet_id, targets, dry_run=not args.run)
+    
     if args.dry_run:
         print("ドライランモード: 変更は行いません。")
         pause_on_exit()

@@ -24,6 +24,8 @@ help:
 	@echo "  make auth"
 	@echo "  make auth AUTH_PORT=9090"
 	@echo "  make dry-run"
+	@echo "  make dry-run ARGS='-n 10'"
+	@echo "  make dry-run ARGS=\"-s 'https://docs.google.com/spreadsheets/d/...'\" "
 	@echo "  make run"
 	@echo "  make run ARGS='-n 10'"
 

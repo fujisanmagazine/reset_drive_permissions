@@ -49,7 +49,7 @@ def authenticate(auth_port=8080, open_browser=True, allow_new_flow=True):
     return creds
 
 
-def get_all_files(service):
+def get_all_files(service, limit=None):
     """マイドライブの全ファイル・フォルダを取得"""
     items = []
     page_token = None
@@ -57,12 +57,13 @@ def get_all_files(service):
     print("ファイル一覧を取得中...")
 
     while True:
+        page_size = min(1000, limit - len(items)) if limit else 1000
         response = service.files().list(
             q="trashed = false",
             spaces='drive',
             fields='nextPageToken, files(id, name, mimeType)',
             pageToken=page_token,
-            pageSize=1000
+            pageSize=page_size
         ).execute()
 
         items.extend(response.get('files', []))
@@ -70,7 +71,7 @@ def get_all_files(service):
 
         print(f"  {len(items)}件取得済み...")
 
-        if not page_token:
+        if not page_token or (limit and len(items) >= limit):
             break
 
     return items
@@ -199,15 +200,13 @@ def main():
 
     service = build('drive', 'v3', credentials=creds)
 
-    files = get_all_files(service)
+    files = get_all_files(service, limit=args.max_items)
     print(f"\n合計 {len(files)} 件のファイル・フォルダを取得\n")
 
     print("-" * 40)
     targets = []
 
     for file in files:
-        if args.max_items and len(targets) >= args.max_items:
-            break
         if restrict_file(service, file, dry_run=not args.run):
             targets.append(file)
 

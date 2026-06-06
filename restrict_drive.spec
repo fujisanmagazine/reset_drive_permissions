@@ -4,7 +4,7 @@ a = Analysis(
     ['restrict_drive.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('credentials.json', '.')],
     hiddenimports=[
         'google.auth',
         'google.auth.transport.requests',

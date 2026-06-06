@@ -20,6 +20,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt pyinstaller
 
+      - name: Write credentials
+        run: |
+          [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("${{ secrets.CREDENTIALS_JSON }}")) | Out-File -FilePath credentials.json -Encoding utf8NoBOM
+        shell: pwsh
+
       - name: Build EXE
         run: pyinstaller restrict_drive.spec
 
